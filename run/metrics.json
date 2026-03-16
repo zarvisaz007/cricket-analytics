@@ -1,1 +1,12 @@
-{}
+{
+  "events": [
+    {
+      "event": "purge",
+      "phase": "demo_purge",
+      "reason": "token_threshold",
+      "ts": "20260316T042313Z",
+      "token_count": 100022,
+      "purge_index": 1
+    }
+  ]
+}
