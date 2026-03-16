@@ -277,7 +277,7 @@ def _kill_old_instances():
             except ProcessLookupError:
                 pass
         if pids:
-            time.sleep(2)  # give it time to die cleanly
+            time.sleep(5)  # give Telegram time to close the old connection
     except Exception:
         pass  # pgrep not available or other error — continue anyway
 
