@@ -20,9 +20,17 @@ import joblib
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
+from sklearn.metrics import log_loss, brier_score_loss
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
+
+from src.ml.features import (
+    build_feature_vector,
+    build_training_dataset,
+    FEATURE_COLS as NEW_FEATURE_COLS,
+    DEFAULT_FEATURES,
+)
 
 load_dotenv()
 
@@ -31,25 +39,13 @@ logger = logging.getLogger(__name__)
 MODEL_PATH = Path(os.getenv("MODEL_PATH", "./data/models/xgb_v1.joblib"))
 MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "2.0.0"
 
 # ---------------------------------------------------------------------------
-# Feature engineering
+# Feature engineering — delegates to features.py (single source of truth)
 # ---------------------------------------------------------------------------
 
-FEATURE_COLS = [
-    "team_a_avg_score",
-    "team_b_avg_score",
-    "team_a_win_rate",
-    "team_b_win_rate",
-    "h2h_team_a_wins",
-    "h2h_total",
-    "venue_home_advantage",
-    "toss_winner_batting",   # 1 if toss winner chose to bat
-    "match_type_encoded",    # T20=0, ODI=1, Test=2
-    "team_a_recent_form",    # wins in last 5
-    "team_b_recent_form",
-]
+FEATURE_COLS = NEW_FEATURE_COLS
 
 
 def _encode_match_type(mt: str) -> int:
@@ -70,6 +66,7 @@ def _generate_synthetic_dataset(n: int = 500) -> pd.DataFrame:
     """
     Create a synthetic cricket match dataset for toy model training.
     Stats are randomly generated within realistic bounds.
+    Produces the canonical 18 FEATURE_COLS expected by the current model.
     """
     random.seed(42)
     np.random.seed(42)
@@ -78,37 +75,62 @@ def _generate_synthetic_dataset(n: int = 500) -> pd.DataFrame:
         ta = random.choice(TEAMS)
         tb = random.choice([t for t in TEAMS if t != ta])
         mt = random.choice(["T20", "ODI", "Test"])
-        ta_avg = random.uniform(130, 320)
-        tb_avg = random.uniform(130, 320)
-        ta_wr = random.uniform(0.3, 0.8)
-        tb_wr = random.uniform(0.3, 0.8)
+
+        ta_elo = random.uniform(1300, 1700)
+        tb_elo = random.uniform(1300, 1700)
+        ta_strength = random.uniform(20, 90)
+        tb_strength = random.uniform(20, 90)
+        ta_form = random.uniform(0.2, 0.8)
+        tb_form = random.uniform(0.2, 0.8)
+
         h2h_a = random.randint(0, 15)
         h2h_tot = h2h_a + random.randint(0, 15)
-        home_adv = random.choice([0, 1])
-        toss_bat = random.choice([0, 1])
-        ta_form = random.randint(0, 5)
-        tb_form = random.randint(0, 5)
+        h2h_win_rate = h2h_a / max(h2h_tot, 1)
+
+        venue_bat = random.uniform(0.8, 1.3)
+        venue_spin = random.uniform(0.7, 1.4)
+        toss_bat = random.choice([0.0, 1.0])
+        toss_is_a = random.choice([0.0, 1.0])
+        mt_enc = float(_encode_match_type(mt))
+
+        ta_bat_rating = random.uniform(30, 90)
+        tb_bat_rating = random.uniform(30, 90)
+        ta_bowl_rating = random.uniform(30, 90)
+        tb_bowl_rating = random.uniform(30, 90)
 
         # Deterministic label with noise
-        score_a = ta_avg * ta_wr + h2h_a / max(h2h_tot, 1) * 30 + home_adv * 10 + ta_form * 5
-        score_b = tb_avg * tb_wr + (h2h_tot - h2h_a) / max(h2h_tot, 1) * 30 + tb_form * 5
+        score_a = (
+            ta_elo * 0.01 + ta_strength * 0.5 + ta_form * 20
+            + h2h_win_rate * 15 + ta_bat_rating * 0.3
+        )
+        score_b = (
+            tb_elo * 0.01 + tb_strength * 0.5 + tb_form * 20
+            + (1 - h2h_win_rate) * 15 + tb_bat_rating * 0.3
+        )
         label = 1 if score_a > score_b else 0
         # Add 10% label noise for realism
         if random.random() < 0.10:
             label = 1 - label
 
         rows.append({
-            "team_a_avg_score": ta_avg,
-            "team_b_avg_score": tb_avg,
-            "team_a_win_rate": ta_wr,
-            "team_b_win_rate": tb_wr,
-            "h2h_team_a_wins": h2h_a,
-            "h2h_total": h2h_tot,
-            "venue_home_advantage": home_adv,
+            "team_a_elo": ta_elo,
+            "team_b_elo": tb_elo,
+            "elo_diff": ta_elo - tb_elo,
+            "team_a_strength": ta_strength,
+            "team_b_strength": tb_strength,
+            "team_a_form_last10": ta_form,
+            "team_b_form_last10": tb_form,
+            "h2h_team_a_win_rate": h2h_win_rate,
+            "h2h_total": float(h2h_tot),
+            "venue_batting_factor": venue_bat,
+            "venue_spin_factor": venue_spin,
             "toss_winner_batting": toss_bat,
-            "match_type_encoded": _encode_match_type(mt),
-            "team_a_recent_form": ta_form,
-            "team_b_recent_form": tb_form,
+            "toss_winner_is_team_a": toss_is_a,
+            "match_type_encoded": mt_enc,
+            "team_a_top_batsman_rating": ta_bat_rating,
+            "team_b_top_batsman_rating": tb_bat_rating,
+            "team_a_top_bowler_rating": ta_bowl_rating,
+            "team_b_top_bowler_rating": tb_bowl_rating,
             "label": label,         # 1 = team_a wins
         })
     return pd.DataFrame(rows)
@@ -120,37 +142,17 @@ def _generate_synthetic_dataset(n: int = 500) -> pd.DataFrame:
 
 def _load_features_from_db() -> Optional[pd.DataFrame]:
     """
-    Extract features from the live DB.  Returns None if insufficient data.
+    Extract features from the live DB using the features.py pipeline.
+    Returns None if insufficient data.
     """
     try:
-        from src.data.db import get_session, Match, PlayerStat
+        from src.data.db import get_session
         session = get_session()
-        matches = session.query(Match).filter(Match.winner.isnot(None)).all()
-        if len(matches) < 20:
-            logger.info("[train] Only %d labelled matches — using synthetic data", len(matches))
+        try:
+            df = build_training_dataset(session)
+        finally:
             session.close()
-            return None
-
-        rows = []
-        for m in matches:
-            # Aggregate per-team stats for these two teams (simplified)
-            label = 1 if m.winner == m.team_a else 0
-            rows.append({
-                "team_a_avg_score": 180.0,   # TODO: compute from player_stats
-                "team_b_avg_score": 175.0,
-                "team_a_win_rate": 0.5,
-                "team_b_win_rate": 0.5,
-                "h2h_team_a_wins": 5,
-                "h2h_total": 10,
-                "venue_home_advantage": 0,
-                "toss_winner_batting": 1 if m.toss_decision == "bat" else 0,
-                "match_type_encoded": _encode_match_type(m.match_type or "T20"),
-                "team_a_recent_form": 3,
-                "team_b_recent_form": 2,
-                "label": label,
-            })
-        session.close()
-        return pd.DataFrame(rows)
+        return df
     except Exception as exc:
         logger.warning("[train] DB feature load failed: %s", exc)
         return None
@@ -198,15 +200,30 @@ def train(force_synthetic: bool = False) -> Dict[str, Any]:
     )
     clf.fit(X_train, y_train)
 
-    accuracy = float((clf.predict(X_test) == y_test).mean())
-    logger.info("[train] Accuracy on hold-out: %.3f", accuracy)
+    y_pred = clf.predict(X_test)
+    y_proba = clf.predict_proba(X_test)
+
+    accuracy = float((y_pred == y_test).mean())
+    model_log_loss = float(log_loss(y_test, y_proba))
+    model_brier = float(brier_score_loss(y_test, y_proba[:, 1]))
+
+    logger.info(
+        "[train] Accuracy=%.3f  LogLoss=%.4f  Brier=%.4f",
+        accuracy, model_log_loss, model_brier,
+    )
+
+    trained_at = datetime.now(timezone.utc).isoformat()
 
     metadata = {
         "model_version": MODEL_VERSION,
-        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "trained_at": trained_at,
         "accuracy": accuracy,
+        "log_loss": model_log_loss,
+        "brier_score": model_brier,
         "feature_cols": FEATURE_COLS,
         "n_samples": len(df),
+        "n_train": len(X_train),
+        "n_test": len(X_test),
         "model_path": str(MODEL_PATH),
     }
 
@@ -218,6 +235,48 @@ def train(force_synthetic: bool = False) -> Dict[str, Any]:
     meta_path = MODEL_PATH.with_suffix(".json")
     with meta_path.open("w") as f:
         json.dump(metadata, f, indent=2)
+
+    # Persist ModelRecord to DB
+    try:
+        from src.data.db import get_session, ModelRecord
+        session = get_session()
+        try:
+            existing = (
+                session.query(ModelRecord)
+                .filter(ModelRecord.version == MODEL_VERSION)
+                .first()
+            )
+            if existing:
+                existing.trained_at = trained_at
+                existing.accuracy = accuracy
+                existing.log_loss = model_log_loss
+                existing.brier_score = model_brier
+                existing.n_train = len(X_train)
+                existing.n_test = len(X_test)
+                existing.feature_cols_json = json.dumps(FEATURE_COLS)
+                existing.model_path = str(MODEL_PATH)
+            else:
+                record = ModelRecord(
+                    version=MODEL_VERSION,
+                    trained_at=trained_at,
+                    accuracy=accuracy,
+                    log_loss=model_log_loss,
+                    brier_score=model_brier,
+                    n_train=len(X_train),
+                    n_test=len(X_test),
+                    feature_cols_json=json.dumps(FEATURE_COLS),
+                    model_path=str(MODEL_PATH),
+                )
+                session.add(record)
+            session.commit()
+            logger.info("[train] ModelRecord upserted for version %s", MODEL_VERSION)
+        except Exception as db_exc:
+            session.rollback()
+            logger.warning("[train] ModelRecord DB upsert failed: %s", db_exc)
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning("[train] Could not persist ModelRecord: %s", exc)
 
     return metadata
 
@@ -254,20 +313,28 @@ def predict_match(
     """
     clf, meta = load_model()
 
-    # Build feature vector (simplified — TODO: look up real stats from DB)
-    features = np.array([[
-        180.0,   # team_a_avg_score
-        175.0,   # team_b_avg_score
-        0.55,    # team_a_win_rate
-        0.50,    # team_b_win_rate
-        6,       # h2h_team_a_wins
-        12,      # h2h_total
-        1 if toss_winner == team_a else 0,
-        1 if toss_decision == "bat" else 0,
-        _encode_match_type(match_type),
-        3,       # team_a_recent_form
-        2,       # team_b_recent_form
-    ]])
+    # Build feature vector from DB using the features pipeline
+    match_dict = {
+        "team_a": team_a,
+        "team_b": team_b,
+        "match_type": match_type,
+        "venue": venue,
+        "toss_winner": toss_winner,
+        "toss_decision": toss_decision,
+    }
+    try:
+        from src.data.db import get_session
+        session = get_session()
+        try:
+            features, _ = build_feature_vector(match_dict, session)
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning("[predict] Feature build failed, using defaults: %s", exc)
+        features = np.array(
+            [[DEFAULT_FEATURES[col] for col in FEATURE_COLS]],
+            dtype=np.float64,
+        )
 
     proba = clf.predict_proba(features)[0]
     # proba[1] = P(team_a wins)

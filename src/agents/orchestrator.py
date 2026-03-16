@@ -143,6 +143,16 @@ def _run_bot_agent() -> None:
     BotAgent().run()
 
 
+def _run_analytics_agent() -> None:
+    from src.agents.analytics_agent import AnalyticsAgent
+    AnalyticsAgent().run()
+
+
+def _run_live_agent() -> None:
+    from src.agents.live_agent import LiveAgent
+    LiveAgent().run()
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -152,6 +162,7 @@ class Orchestrator:
 
     PHASES = [
         "phase_ingestion_seed",
+        "phase_analytics_compute",   # NEW
         "phase_model_train",
         "phase_bot_ready",
     ]
@@ -201,6 +212,7 @@ class Orchestrator:
     def _run_phase(self, phase: str) -> None:
         dispatch = {
             "phase_ingestion_seed": self._phase_ingestion,
+            "phase_analytics_compute": self._phase_analytics,
             "phase_model_train": self._phase_model_train,
             "phase_bot_ready": self._phase_bot_ready,
         }
@@ -214,9 +226,21 @@ class Orchestrator:
         p = multiprocessing.Process(target=_run_ingestion_agent, name="ingestion_agent")
         p.start()
         self.ctx.add_message("orchestrator", "info", "Spawned ingestion_agent")
-        p.join(timeout=120)
+        p.join(timeout=int(os.getenv("INGESTION_TIMEOUT_SECONDS", "300")))
         if p.is_alive():
             logger.warning("[orchestrator] ingestion_agent timed out — terminating")
+            p.terminate()
+        self._drain_queue()
+
+    def _phase_analytics(self) -> None:
+        """Spawn analytics agent, wait for completion."""
+        timeout = int(os.getenv("ANALYTICS_TIMEOUT_SECONDS", "600"))
+        p = multiprocessing.Process(target=_run_analytics_agent, name="analytics_agent")
+        p.start()
+        self.ctx.add_message("orchestrator", "info", "Spawned analytics_agent")
+        p.join(timeout=timeout)
+        if p.is_alive():
+            logger.warning("[orchestrator] analytics_agent timed out — terminating")
             p.terminate()
         self._drain_queue()
 
@@ -232,18 +256,23 @@ class Orchestrator:
         self._drain_queue()
 
     def _phase_bot_ready(self) -> None:
-        """Spawn bot agent (non-blocking — runs until KeyboardInterrupt)."""
-        logger.info("[orchestrator] Launching bot_agent (detached) …")
+        """Spawn bot agent and live monitor (both non-blocking)."""
+        logger.info("[orchestrator] Launching bot_agent and live_agent (detached) …")
+
+        live_p = multiprocessing.Process(target=_run_live_agent, name="live_agent", daemon=True)
+        live_p.start()
+        self.ctx.add_message("orchestrator", "info", "Live agent launched (PID %d)" % live_p.pid)
+
         p = multiprocessing.Process(target=_run_bot_agent, name="bot_agent", daemon=True)
         p.start()
         self.ctx.add_message("orchestrator", "info", "Bot agent launched (PID %d)" % p.pid)
-        # Keep orchestrator alive while bot runs
         logger.info("[orchestrator] Bot running. Press Ctrl+C to stop.")
         try:
             p.join()
         except KeyboardInterrupt:
-            logger.info("[orchestrator] Received Ctrl+C — stopping bot.")
+            logger.info("[orchestrator] Received Ctrl+C — stopping.")
             p.terminate()
+            live_p.terminate()
 
     def _drain_queue(self) -> None:
         """Read and log all pending IPC messages."""
@@ -273,7 +302,11 @@ def main() -> None:
     parser.add_argument(
         "--phase-only",
         metavar="PHASE",
-        help="Run a single phase (phase_ingestion_seed | phase_model_train | phase_bot_ready)",
+        help=(
+            "Run a single phase "
+            "(phase_ingestion_seed | phase_analytics_compute | "
+            "phase_model_train | phase_bot_ready)"
+        ),
     )
     args = parser.parse_args()
 

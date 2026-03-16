@@ -20,4 +20,9 @@ DB_FILE="${DB_FILE#./}"
 sqlite3 "$DB_FILE" < src/data/schema.sql
 echo "    Database: $DB_FILE"
 
+echo "==> Running Phase 2 migrations …"
+PYTHON=$(command -v .venv/bin/python3 || command -v python3)
+$PYTHON -m src.data.migrations.add_phase2_tables
+echo "    Phase 2 tables created/verified."
+
 echo "==> Done. Run 'bash scripts/start_all_agents.sh' to launch."

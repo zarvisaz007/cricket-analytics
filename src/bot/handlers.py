@@ -36,6 +36,10 @@ def _main_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("👤 Player Report", callback_data="player_list"),
+            InlineKeyboardButton("🏆 Leaderboards", callback_data="leaderboard_menu"),
+        ],
+        [
+            InlineKeyboardButton("📊 Simulate Match", callback_data="simulate_list"),
             InlineKeyboardButton("⚙️ Settings", callback_data="settings_main"),
         ],
     ])
@@ -221,7 +225,8 @@ async def handle_predict_callback(update: Update, context: ContextTypes.DEFAULT_
         f"Match type: {match.match_type} | {match.venue or 'Venue TBD'}"
     )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("❓ Why?", callback_data=f"why_{match_id}")],
+        [InlineKeyboardButton("❓ Why?", callback_data=f"why_{match_id}"),
+         InlineKeyboardButton("📊 H2H", callback_data=f"h2h_{match_id}")],
         [InlineKeyboardButton("⬅️ Back", callback_data="matches_upcoming")],
     ])
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
@@ -368,3 +373,145 @@ def _save_prediction(match_id: int, pred: dict) -> None:
         logger.warning("[handlers] prediction save failed: %s", exc)
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# New handlers — Leaderboards, Simulate, H2H
+# ---------------------------------------------------------------------------
+
+async def handle_leaderboard_callback(update, context):
+    """Handle leaderboard_menu, leaderboard_batting_T20, leaderboard_bowling_T20, leaderboard_elo"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "leaderboard_menu":
+        # show format/type selection keyboard
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏏 T20 Batting", callback_data="leaderboard_batting_T20"),
+             InlineKeyboardButton("🏏 ODI Batting", callback_data="leaderboard_batting_ODI")],
+            [InlineKeyboardButton("🎳 T20 Bowling", callback_data="leaderboard_bowling_T20"),
+             InlineKeyboardButton("🎳 ODI Bowling", callback_data="leaderboard_bowling_ODI")],
+            [InlineKeyboardButton("🌍 Team Elo Rankings", callback_data="leaderboard_elo_T20")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu_main")],
+        ])
+        await query.edit_message_text("🏆 *Leaderboards*\nChoose a ranking:", reply_markup=keyboard, parse_mode="Markdown")
+        return
+
+    # Parse: leaderboard_{type}_{format}
+    parts = data.split("_")
+    lb_type = parts[1] if len(parts) > 1 else "batting"
+    lb_format = parts[2] if len(parts) > 2 else "T20"
+
+    from src.analytics.leaderboards import (
+        get_batting_leaderboard, get_bowling_leaderboard, get_elo_leaderboard,
+        format_batting_leaderboard_text, format_bowling_leaderboard_text, format_elo_leaderboard_text
+    )
+
+    try:
+        if lb_type == "batting":
+            leaders = get_batting_leaderboard(lb_format, limit=10)
+            text = format_batting_leaderboard_text(leaders) or "No batting data yet."
+        elif lb_type == "bowling":
+            leaders = get_bowling_leaderboard(lb_format, limit=10)
+            text = format_bowling_leaderboard_text(leaders) or "No bowling data yet."
+        elif lb_type == "elo":
+            leaders = get_elo_leaderboard(lb_format, limit=10)
+            text = format_elo_leaderboard_text(leaders) or "No Elo data yet."
+        else:
+            text = "Unknown leaderboard type."
+    except Exception as exc:
+        text = f"Could not load leaderboard: {exc}"
+
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="leaderboard_menu")]])
+    await query.edit_message_text(text, reply_markup=back_kb, parse_mode="Markdown")
+
+
+async def handle_simulate_callback(update, context):
+    """Handle simulate_list and simulate_match_<id>"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "simulate_list":
+        matches = _get_upcoming_matches(8)
+        if not matches:
+            await query.edit_message_text("No matches found.", reply_markup=_back_keyboard())
+            return
+        buttons = [[InlineKeyboardButton(
+            f"{m.team_a} vs {m.team_b}", callback_data=f"simulate_match_{m.id}"
+        )] for m in matches]
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu_main")])
+        await query.edit_message_text(
+            "📊 *Simulate Match*\nChoose a match for Monte Carlo simulation:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="Markdown",
+        )
+        return
+
+    match_id = int(data.split("_")[-1])
+    match = _get_match_by_id(match_id)
+    if not match:
+        await query.edit_message_text("Match not found.")
+        return
+
+    await query.edit_message_text("⏳ Running 2000 simulations...")
+
+    try:
+        from src.ml.simulator import simulate_match
+        result = simulate_match(
+            team_a=match.team_a,
+            team_b=match.team_b,
+            format=match.match_type or "T20",
+            venue=match.venue or "",
+        )
+        text = (
+            f"📊 *Monte Carlo Simulation*\n"
+            f"*{match.team_a}* vs *{match.team_b}*\n"
+            f"_{match.match_type} — {match.venue or 'Venue TBD'}_\n\n"
+            f"🏆 Win Probability:\n"
+            f"• {match.team_a}: *{result['win_prob_a']*100:.1f}%*\n"
+            f"• {match.team_b}: *{result['win_prob_b']*100:.1f}%*\n\n"
+            f"📈 Score Projections (10th/50th/90th percentile):\n"
+            f"• {match.team_a}: {result['score_p10_a']:.0f} / {result['score_p50_a']:.0f} / {result['score_p90_a']:.0f}\n"
+            f"• {match.team_b}: {result['score_p10_b']:.0f} / {result['score_p50_b']:.0f} / {result['score_p90_b']:.0f}\n\n"
+            f"_Based on {result['n_sims']} simulations_"
+        )
+    except Exception as exc:
+        text = f"Simulation failed: {exc}"
+
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="simulate_list")]])
+    await query.edit_message_text(text, reply_markup=back_kb, parse_mode="Markdown")
+
+
+async def handle_h2h_callback(update, context):
+    """Handle head-to-head queries: h2h_<match_id>"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    # Extract match_id from callback data format: h2h_{match_id}
+    parts = data.split("_")
+    match_id = int(parts[-1]) if len(parts) > 1 else 0
+    match = _get_match_by_id(match_id)
+    if not match:
+        await query.edit_message_text("Match not found.")
+        return
+
+    try:
+        from src.analytics.leaderboards import get_h2h_summary
+        h2h = get_h2h_summary(match.team_a, match.team_b, format=match.match_type)
+        text = (
+            f"📊 *Head-to-Head*\n"
+            f"*{match.team_a}* vs *{match.team_b}*\n\n"
+            f"Total matches: {h2h['total_matches']}\n"
+            f"{match.team_a} wins: {h2h['team_a_wins']} ({h2h['win_pct_a']*100:.0f}%)\n"
+            f"{match.team_b} wins: {h2h['team_b_wins']}\n"
+            f"Ties/NR: {h2h['ties']}\n\n"
+            f"Last 5 results: {' '.join(h2h.get('last_5_results', []))}"
+        )
+    except Exception as exc:
+        text = f"H2H data unavailable: {exc}"
+
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"predict_match_{match_id}")]])
+    await query.edit_message_text(text, reply_markup=back_kb, parse_mode="Markdown")

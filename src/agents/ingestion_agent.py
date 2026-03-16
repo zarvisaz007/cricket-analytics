@@ -104,11 +104,41 @@ def _fetch_cricapi(n: int = 50) -> List[Dict]:
 
 
 def _fetch_espn_scrape(n: int = 50) -> List[Dict]:
-    """
-    TODO: Implement ESPNCricinfo scraper using requests + BeautifulSoup.
-    """
-    logger.warning("[ingestion] espn_scrape not implemented — falling back to mock")
-    return _generate_mock_matches(n)
+    """Fetch real match data from ESPNcricinfo via web scraping."""
+    try:
+        from src.scrapers.espn_historical import discover_matches
+        from src.scrapers.espn_scorecard import parse_scorecard_to_db
+        from src.data.db import get_session, init_db
+
+        init_db()
+        session = get_session()
+
+        # Discover and scrape recent matches (last 2 years for regular runs)
+        current_year = datetime.now().year
+        scraped = []
+
+        # Use discover_matches to get match metadata (lightweight)
+        for match_data in discover_matches(
+            start_year=current_year - 1,
+            end_year=current_year,
+            formats=["twenty20-internationals", "one-day-internationals"],
+        ):
+            # parse_scorecard_to_db handles full upsert
+            espn_id = match_data.get("espn_match_id")
+            if espn_id:
+                parse_scorecard_to_db(int(espn_id), session)
+            scraped.append(match_data)
+            if len(scraped) >= n:
+                break
+
+        session.close()
+        logger.info("[ingestion] ESPN scrape complete — %d matches processed", len(scraped))
+
+        # Return basic match dicts for the DB upsert in IngestionAgent.run()
+        return scraped if scraped else _generate_mock_matches(n)
+    except Exception as exc:
+        logger.warning("[ingestion] ESPN scrape failed: %s — falling back to mock", exc)
+        return _generate_mock_matches(n)
 
 
 # ---------------------------------------------------------------------------

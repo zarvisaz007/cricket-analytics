@@ -39,6 +39,9 @@ def run_bot() -> None:
         handle_matches_callback,
         handle_player_callback,
         handle_settings_callback,
+        handle_leaderboard_callback,
+        handle_simulate_callback,
+        handle_h2h_callback,
         handle_text,
     )
 
@@ -48,12 +51,16 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
 
-    # Inline keyboard callbacks
+    # Inline keyboard callbacks (order matters — more specific patterns first)
     app.add_handler(CallbackQueryHandler(handle_matches_callback, pattern="^matches"))
+    app.add_handler(CallbackQueryHandler(handle_simulate_callback, pattern="^simulate"))
     app.add_handler(CallbackQueryHandler(handle_predict_callback, pattern="^predict"))
     app.add_handler(CallbackQueryHandler(handle_why_callback, pattern="^why_"))
+    app.add_handler(CallbackQueryHandler(handle_h2h_callback, pattern="^h2h_"))
+    app.add_handler(CallbackQueryHandler(handle_leaderboard_callback, pattern="^leaderboard"))
     app.add_handler(CallbackQueryHandler(handle_player_callback, pattern="^player"))
     app.add_handler(CallbackQueryHandler(handle_settings_callback, pattern="^settings"))
+    app.add_handler(CallbackQueryHandler(handle_menu_button, pattern="^menu_"))
 
     # Free text
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
