@@ -258,12 +258,37 @@ def step_run_bot():
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _kill_old_instances():
+    """Kill any previously running cricket bot processes before starting."""
+    import os
+    import signal
+    import subprocess
+    my_pid = os.getpid()
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "src.bot.main"],
+            capture_output=True, text=True
+        )
+        pids = [int(p) for p in result.stdout.split() if p.strip() and int(p) != my_pid]
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                log.info("Killed old bot instance (PID %d).", pid)
+            except ProcessLookupError:
+                pass
+        if pids:
+            time.sleep(2)  # give it time to die cleanly
+    except Exception:
+        pass  # pgrep not available or other error — continue anyway
+
+
 def main():
     print("""
 ╔══════════════════════════════════════════════╗
 ║   🏏  Cricket Analytics Bot — starting up   ║
 ╚══════════════════════════════════════════════╝
 """)
+    _kill_old_instances()
 
     # ── Sequential startup ────────────────────────────────────────────────────
     step_init()
