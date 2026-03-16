@@ -12,10 +12,13 @@ dist/
 build/
 .DS_Store
 data/cricket.db
+data/cricket.db-journal
 data/models/*.joblib
 data/models/*.json
 data/llm_cache/
 data/context_archives/
+data/cricsheet_cache/
+data/scrape_progress.json
 logs/
 run/queue/
 run/metrics.json
